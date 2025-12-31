@@ -45,7 +45,7 @@ class HybridConvNeXtV2(nn.Module):
         if pretrained:
             try:
                 state = torch.hub.load_state_dict_from_url(
-                    "https://dl.fbaipublicfiles.com/convnext/convnextv2_tiny_1k_224.pth",
+                    "https://dl.fbaipublicfiles.com/convnext/convnextv2/im1k/convnextv2_tiny_1k_224_ema.pt",
                     map_location="cpu"
                 )
                 base.load_state_dict(state.get("model", state), strict=False)
