@@ -5,26 +5,33 @@ import torch.nn.functional as F
 
 class SeparableSelfAttention(nn.Module):
     """
-    Implements the separable self-attention from the paper (MobileViT-v2 style)
-    Input: x [B, N, C]   (N = H*W tokens)
-    Output: y [B, N, C]
+    Fully separable self-attention
+    Parameter complexity: O(C)
     """
 
     def __init__(self, dim):
         super().__init__()
-        self.WI = nn.Linear(dim, 1)     # produce scalar score per token
-        self.WK = nn.Linear(dim, dim)
-        self.WV = nn.Linear(dim, dim)
-        self.WO = nn.Linear(dim, dim)
+
+        # latent token projection
+        self.WI = nn.Linear(dim, 1, bias=False)
+
+        # channel-wise parameters (NO CxC)
+        self.key_scale = nn.Parameter(torch.ones(dim))
+        self.value_scale = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        # x: [B, N, C]
-        scores = self.WI(x)            # [B, N, 1]
-        weights = F.softmax(scores, dim=1)  # [B, N, 1]
-        keys = self.WK(x)              # [B, N, C]
-        # context vector
-        context = (weights * keys).sum(dim=1)  # [B, C]
-        v = F.relu(self.WV(x))         # [B, N, C]
-        z = v * context.unsqueeze(1)   # broadcast [B, N, C]
-        y = self.WO(z)
-        return y
+        """
+        x: [B, N, C]
+        """
+        # latent attention weights
+        scores = self.WI(x)                    # [B, N, 1]
+        weights = F.softmax(scores, dim=1)
+
+        # context vector (channel-wise)
+        context = torch.sum(weights * x, dim=1)   # [B, C]
+
+        # channel-wise modulation
+        out = x * context.unsqueeze(1)
+        out = out * self.value_scale
+
+        return out
