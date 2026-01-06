@@ -1,3 +1,4 @@
+# train.py
 #!/usr/bin/env python3
 """
 Robust training script with debug / sanity checks.
