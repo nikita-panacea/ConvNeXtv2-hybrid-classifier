@@ -5,13 +5,7 @@ from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_
 ISIC_CLASSES = ["MEL","NV","BCC","AK","BKL","DF","VASC","SCC"]
 
 def compute_classwise_metrics(y_true, y_pred, class_names=ISIC_CLASSES):
-    """
-    Returns:
-      per_class: dict[class_name] -> {precision, recall (sensitivity), specificity, f1, support}
-      overall: dict with accuracy, macro_f1, micro_f1
-    """
     if len(y_true) == 0:
-        # defensive
         per_class = {c: {"precision": 0.0, "recall": 0.0, "specificity": 0.0, "f1": 0.0, "support": 0} for c in class_names}
         overall = {"accuracy": 0.0, "macro_f1": 0.0, "micro_f1": 0.0}
         return per_class, overall
@@ -42,8 +36,8 @@ def compute_classwise_metrics(y_true, y_pred, class_names=ISIC_CLASSES):
 
     overall = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
-        "macro_f1": float(f1_score(y_true, y_pred, labels=labels, average="macro")),
-        "micro_f1": float(f1_score(y_true, y_pred, labels=labels, average="micro")),
+        "macro_f1": float(f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0)),
+        "micro_f1": float(f1_score(y_true, y_pred, labels=labels, average="micro", zero_division=0)),
         "precision_macro": float(precision_score(y_true, y_pred, labels=labels, average="macro", zero_division=0)),
         "recall_macro": float(recall_score(y_true, y_pred, labels=labels, average="macro", zero_division=0)),
     }

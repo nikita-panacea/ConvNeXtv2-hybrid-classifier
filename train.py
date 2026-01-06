@@ -1,25 +1,25 @@
-# train.py
 #!/usr/bin/env python3
 """
-Robust training script with debug / sanity checks.
+Robust training script with fixes to reproduce paper results.
 
-New CLI flags:
-  --overfit_mode            : Use train set for both train+val, deterministic transforms,
-                              disable EMA/scheduler. Works with --overfit_n.
-  --freeze_backbone         : Freeze all parameters except the head (for linear probe).
-  --unfreeze_after <epoch>  : Unfreeze whole model at given epoch (recreates optimizer).
+Key fixes:
+ - optimizer initialized at peak_lr (so scheduler factors are relative to peak_lr)
+ - scheduler lr lambda defined relative to peak_lr (warmup start->peak then cosine->0)
+ - WeightedRandomSampler used to mitigate severe class imbalance
+ - class weights = inverse frequency (capped) used in CrossEntropyLoss
+ - explicit classifier head init
 """
 import os
 import time
 import math
 import argparse
 from collections import Counter
-
+import random
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from tqdm import tqdm
 
 from datasets.isic2019_dataset import ISIC2019Dataset, ISIC_CLASSES
@@ -36,9 +36,9 @@ def parse_args():
     p.add_argument("--img_dir", required=True)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=32)
-    p.add_argument("--base_lr", type=float, default=0.1)
-    p.add_argument("--peak_lr", type=float, default=0.01)
-    p.add_argument("--start_lr", type=float, default=1e-5)
+    p.add_argument("--base_lr", type=float, default=0.1)      # kept for compatibility (not used as optimizer lr)
+    p.add_argument("--peak_lr", type=float, default=0.01)     # effective peak lr (paper)
+    p.add_argument("--start_lr", type=float, default=1e-5)    # warmup start (paper)
     p.add_argument("--weight_decay", type=float, default=2e-5)
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--warmup_epochs", type=int, default=5)
@@ -52,22 +52,35 @@ def parse_args():
     p.add_argument("--sanity_run", type=int, default=0, help="run N iterations only then exit (debug)")
     p.add_argument("--overfit_n", type=int, default=0, help="overfit on N samples from train set (debug)")
     p.add_argument("--sanity_check_first_batch", action="store_true", help="run detailed first-batch debug and exit")
-    # New flags
     p.add_argument("--overfit_mode", action="store_true", help="run strict overfit protocol (deterministic, same samples for val)")
     p.add_argument("--freeze_backbone", action="store_true", help="freeze backbone parameters (keep head trainable)")
     p.add_argument("--unfreeze_after", type=int, default=-1, help="epoch number to unfreeze whole model (>=0 to enable)")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--grad_clip", type=float, default=0.0, help="clip grads by norm if >0")
     return p.parse_args()
 
-def get_scheduler(optimizer, total_epochs, iters_per_epoch, warmup_epochs, base_lr, peak_lr, start_lr):
+def set_seeds(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def get_scheduler(optimizer, total_epochs, iters_per_epoch, warmup_epochs, peak_lr, start_lr):
+    """
+    Scheduler returns multiplicative factor relative to optimizer.lr (which we set to peak_lr).
+    Warmup: start_lr -> peak_lr over warmup_epochs.
+    Cosine anneal: peak_lr -> 0 across remainder of total steps.
+    """
     total_steps = total_epochs * iters_per_epoch
     warmup_steps = warmup_epochs * iters_per_epoch
-    start_factor = float(start_lr) / float(base_lr)
-    peak_factor = float(peak_lr) / float(base_lr)
+    start_factor = float(start_lr) / float(peak_lr)
+    peak_factor = 1.0  # optimizer is created with lr=peak_lr
 
     def lr_lambda(step):
         if step < warmup_steps:
-            return start_factor + (peak_factor - start_factor) * (step / max(1, warmup_steps))
-        progress = (step - warmup_steps) / max(1, (total_steps - warmup_steps))
+            return start_factor + (peak_factor - start_factor) * (float(step) / max(1, warmup_steps))
+        progress = (float(step) - warmup_steps) / max(1, (total_steps - warmup_steps))
+        # cosine from 1 -> 0
         return 0.5 * (1.0 + math.cos(math.pi * progress)) * peak_factor
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
@@ -105,23 +118,24 @@ def first_batch_debug(imgs, labels, model, criterion, optimizer, device):
     loss = criterion(logits, labels)
     optimizer.zero_grad()
     loss.backward()
-    grads = [(n, p.grad.norm().item() if p.grad is not None else None) for n,p in model.named_parameters() if p.requires_grad]
-    grads = sorted(grads, key=lambda x: (0 if x[1] is None else -x[1]))[:20]
+    grads = [(n, (p.grad.norm().item() if p.grad is not None else None)) for n,p in model.named_parameters() if p.requires_grad]
+    grads = sorted(grads, key=lambda x: (0 if x[1] is None else -x[1]))[:40]
     print("Top grads:", grads)
     return loss.item()
 
-def reconfigure_optimizer_and_scheduler(model, args, train_loader, device):
+def reconfigure_optimizer_and_scheduler(model, args, train_loader):
     params = [p for p in model.parameters() if p.requires_grad]
+    # Create optimizer with lr = peak_lr (paper effective learning rate)
     if args.optimizer == "sgd":
-        optimizer = optim.SGD(params, lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
+        optimizer = optim.SGD(params, lr=args.peak_lr, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=False)
     else:
-        optimizer = optim.AdamW(params, lr=max(1e-5, args.base_lr * 0.1), weight_decay=args.weight_decay)
+        optimizer = optim.AdamW(params, lr=max(1e-5, args.peak_lr * 0.1), weight_decay=args.weight_decay)
 
     if args.no_scheduler or args.overfit_mode:
         scheduler = None
     else:
         scheduler = get_scheduler(optimizer, total_epochs=args.epochs, iters_per_epoch=len(train_loader),
-                                  warmup_epochs=args.warmup_epochs, base_lr=args.base_lr, peak_lr=args.peak_lr, start_lr=args.start_lr)
+                                  warmup_epochs=args.warmup_epochs, peak_lr=args.peak_lr, start_lr=args.start_lr)
     return optimizer, scheduler
 
 def train_one_epoch(model, loader, optimizer, criterion, device, epoch, scheduler=None, ema=None, args=None, global_step_ref=[0]):
@@ -133,9 +147,8 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch, schedule
         imgs = imgs.to(device)
         labels = labels.to(device)
 
-        lr = optimizer.param_groups[0]['lr']
-        if (i % 100) == 0:
-            print(f"  [epoch {epoch} iter {i}] lr={lr:.6e}")
+        if (i % 200) == 0:
+            print(f"  [epoch {epoch} iter {i}] lr={optimizer.param_groups[0]['lr']:.6e}")
 
         if args.mixup_alpha > 0 and epoch >= args.warmup_epochs:
             imgs, y_a, y_b, lam = mixup_data(imgs, labels, alpha=args.mixup_alpha)
@@ -147,6 +160,10 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch, schedule
 
         optimizer.zero_grad()
         loss.backward()
+
+        if args.grad_clip and args.grad_clip > 0.0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
         optimizer.step()
 
         if scheduler is not None and not args.no_scheduler:
@@ -155,10 +172,13 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch, schedule
         if ema is not None and epoch >= args.warmup_epochs:
             ema.update(model)
 
-        # train accuracy (useful for overfit debug)
+        # train accuracy (mixup-aware)
         with torch.no_grad():
             preds = torch.argmax(logits, dim=1)
-            acc = (preds == labels).float().mean().item()
+            if args.mixup_alpha > 0 and epoch >= args.warmup_epochs:
+                acc = (lam * (preds == y_a).float() + (1-lam) * (preds == y_b).float()).mean().item()
+            else:
+                acc = (preds == labels).float().mean().item()
 
         batch_size = imgs.size(0)
         running_loss += float(loss.item()) * batch_size
@@ -182,14 +202,14 @@ def validate(model, loader, device):
             logits = model(imgs)
             preds = torch.argmax(logits, dim=1).cpu().numpy()
             all_preds.extend(preds.tolist())
-            all_targets.extend(labels.numpy().tolist())
+            if isinstance(labels, torch.Tensor):
+                all_targets.extend(labels.cpu().numpy().tolist())
+            else:
+                all_targets.extend(list(labels))
     per_class, overall = compute_classwise_metrics(all_targets, all_preds)
     return per_class, overall
 
 def freeze_backbone_except_head(model, head_keywords=("head", "classifier")):
-    """
-    Freeze all params except those whose module/parameter names contain keywords in head_keywords.
-    """
     for name, p in model.named_parameters():
         if any(k in name for k in head_keywords):
             p.requires_grad = True
@@ -200,11 +220,42 @@ def unfreeze_all(model):
     for p in model.parameters():
         p.requires_grad = True
 
+def build_train_sampler(dataset, csv_path):
+    """
+    Build a WeightedRandomSampler with sample weights inverse to class frequency.
+    Expects dataset.__getitem__ returns (img, label, name)
+    """
+    import pandas as pd
+    df = pd.read_csv(csv_path)
+    # Extract labels same way as dataset does: attempt 'label' else one-hot mapping
+    if "label" in df.columns:
+        labels = df["label"].astype(int).values
+    else:
+        # find available columns in ISIC_CLASSES order
+        available = [c for c in ISIC_CLASSES if c in df.columns]
+        onehots = df[available].fillna(0).astype(int).values
+        argmax_idx = onehots.argmax(axis=1)
+        mapping = {i: ISIC_CLASSES.index(col) for i, col in enumerate(available)}
+        labels = [mapping[int(a)] for a in argmax_idx]
+        labels = np.array(labels, dtype=int)
+
+    # For subset datasets the dataset length may differ: map by dataset indices
+    # If dataset is a Subset, extract original indices
+    if hasattr(dataset, "indices"):
+        labels = np.array(labels)[dataset.indices]
+    # class counts
+    counts = np.bincount(labels, minlength=len(ISIC_CLASSES)).astype(float) + 1e-6
+    inv_freq = 1.0 / counts
+    sample_weights = inv_freq[labels]
+    sampler = WeightedRandomSampler(weights=sample_weights.tolist(), num_samples=len(sample_weights), replacement=True)
+    return sampler
+
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print("Device:", device)
+    set_seeds(args.seed)
 
     print("Train CSV distribution:")
     show_class_distribution(args.train_csv)
@@ -212,16 +263,15 @@ def main():
         print("Val CSV distribution:")
         show_class_distribution(args.val_csv)
 
-    # build transforms: deterministic if overfit_mode
+    # transforms
     train_tf = build_transforms(train=(not args.overfit_mode), input_size=224, deterministic=args.overfit_mode)
     val_tf   = build_transforms(train=False, input_size=224, deterministic=args.overfit_mode)
 
-    # In overfit_mode, use the *same* dataset for train and val to ensure identical samples
+    # dataset selection
     if args.overfit_mode:
         full_ds = ISIC2019Dataset(args.train_csv, args.img_dir, transform=train_tf)
         if args.overfit_n and args.overfit_n > 0:
             n = min(args.overfit_n, len(full_ds))
-            print(f"Overfit mode: taking first {n} examples of train set for BOTH train+val.")
             idxs = list(range(n))
             train_ds = Subset(full_ds, idxs)
             val_ds = Subset(full_ds, idxs)
@@ -232,7 +282,6 @@ def main():
         train_ds = ISIC2019Dataset(args.train_csv, args.img_dir, transform=train_tf)
         if args.overfit_n and args.overfit_n > 0:
             n = min(args.overfit_n, len(train_ds))
-            print(f"Overfit mode (subset only): taking first {n} examples of train set for training only.")
             idxs = list(range(n))
             train_ds = Subset(train_ds, idxs)
         if args.val_csv:
@@ -240,50 +289,49 @@ def main():
         else:
             raise ValueError("val_csv must be provided unless --overfit_mode is used")
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=True)
+    # build sampler to mitigate class imbalance (only in normal mode)
+    if not args.overfit_mode:
+        train_sampler = build_train_sampler(train_ds, args.train_csv)
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False,
+                                  num_workers=args.num_workers, pin_memory=True, sampler=train_sampler)
+    else:
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                                  num_workers=args.num_workers, pin_memory=True)
+
     val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                               num_workers=args.num_workers, pin_memory=True)
 
-    # model = HybridConvNeXtV2(num_classes=len(ISIC_CLASSES), pretrained=True).to(device)
     model = HybridConvNeXtV2(num_classes=len(ISIC_CLASSES), pretrained=True).to(device)
 
+    # initialize classification head (stable init)
+    if hasattr(model, "head") and isinstance(model.head, nn.Linear):
+        nn.init.kaiming_normal_(model.head.weight, mode="fan_out", nonlinearity="relu")
+        if model.head.bias is not None:
+            nn.init.zeros_(model.head.bias)
+
     if args.overfit_mode:
-        print("Overfit mode: freezing backbone, training head only.")
-        freeze_backbone_except_head(
-            model,
-            head_keywords=("head", "classifier", "fc")
-        )
+        freeze_backbone_except_head(model, head_keywords=("head", "classifier", "fc"))
+        print("Overfit mode: backbone frozen; training head only.")
 
-
-    # Optional freezing for linear probe
     if args.freeze_backbone:
         freeze_backbone_except_head(model, head_keywords=("head", "classifier", "norm", "fc"))
         print("Backbone frozen (only head/classifier params trainable).")
 
-    # If user explicitly wants to force-unfreeze for debugging, keep present (rare)
-    # NOTE: model.parameters() requires_grad is used below to create optimizer param groups.
-
     print("Trainable params count (before optimizer):", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
-    # class weights (kept but optional)
-    class_weights = compute_class_weights_from_csv(args.train_csv, class_names=ISIC_CLASSES, device=device)
-    print("class_weights:", class_weights.cpu().tolist())
+    # class weights (inverse frequency, capped)
+    class_weights = compute_class_weights_from_csv(args.train_csv, class_names=ISIC_CLASSES, device="cpu", max_weight=10.0)
+    print("class_weights (cpu):", class_weights.tolist())
+    # move to device for loss
+    class_weights_device = class_weights.to(device)
 
-    # choice of loss: use weights normally; keep simple for overfit tests
-    if args.overfit_mode:
-        criterion = nn.CrossEntropyLoss()
-    else:
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.CrossEntropyLoss(weight=None if args.overfit_mode else class_weights_device)
 
-    # create optimizer and (optionally) scheduler
-    optimizer, scheduler = reconfigure_optimizer_and_scheduler(model, args, train_loader, device)
+    optimizer, scheduler = reconfigure_optimizer_and_scheduler(model, args, train_loader)
 
-    # EMA disabled in strict overfit mode (it slows memorization)
     ema = None if args.overfit_mode else ModelEMA(model, decay=args.ema_decay, device=device)
 
     if args.sanity_check_first_batch:
-        print("Running single-batch debug and exiting (--sanity_check_first_batch).")
         imgs, labels, _ = next(iter(train_loader))
         first_batch_debug(imgs, labels, model, criterion, optimizer, device)
         return
@@ -301,11 +349,11 @@ def main():
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device,
                                      epoch, scheduler=scheduler, ema=ema, args=args, global_step_ref=global_step)
 
-        # Unfreeze on schedule if requested
+        # Unfreeze if scheduled
         if args.unfreeze_after >= 0 and epoch == args.unfreeze_after:
             print(f"Unfreezing entire model at epoch {epoch}. Recreating optimizer/scheduler.")
             unfreeze_all(model)
-            optimizer, scheduler = reconfigure_optimizer_and_scheduler(model, args, train_loader, device)
+            optimizer, scheduler = reconfigure_optimizer_and_scheduler(model, args, train_loader)
 
         eval_model = ema.ema if (ema is not None and epoch >= args.warmup_epochs) else model
         per_class_val, overall_val = validate(eval_model, val_loader, device)
