@@ -1,44 +1,50 @@
-# datasets/isic2019_dataset.py
 import os
 import pandas as pd
-from PIL import Image
+import torch
 from torch.utils.data import Dataset
+from PIL import Image
 
-ISIC_CLASSES = ["MEL","NV","BCC","AK","BKL","DF","VASC","SCC"]
+ISIC_CLASSES = ["MEL", "NV", "BCC", "AK", "BKL", "DF", "VASC", "SCC", "UNK"]
 
 class ISIC2019Dataset(Dataset):
-    """
-    CSV-based ISIC-2019 loader.
-
-    CSV expectations:
-    - column 'image' with image id (without extension), e.g., ISIC_0000000
-    - either 'label' column with integer 0..7 OR one-hot columns for ISIC_CLASSES
-    """
-
-    def __init__(self, csv_path, image_dir, transform=None, ext=".jpg"):
+    def __init__(self, csv_path, img_dir, transform=None):
         self.df = pd.read_csv(csv_path)
-        self.image_dir = image_dir
+        self.img_dir = img_dir
         self.transform = transform
-        self.ext = ext
 
-        if "label" in self.df.columns:
-            self.labels = self.df["label"].values.astype(int)
+        # sanity check
+        for c in ISIC_CLASSES:
+            assert c in self.df.columns, f"Missing column {c} in CSV"
+
+        # convert one-hot → class index ONCE
+        self.labels = self.df[ISIC_CLASSES].values.argmax(axis=1)
+
+        # image column
+        if "image" in self.df.columns:
+            self.images = self.df["image"].values
+        elif "image_id" in self.df.columns:
+            self.images = self.df["image_id"].values
         else:
-            # expect one-hot columns
-            self.labels = self.df[ISIC_CLASSES].values.argmax(axis=1)
-
-        self.image_ids = self.df["image"].astype(str).values
+            raise ValueError("CSV must contain 'image' or 'image_id' column")
 
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
-        img_id = self.image_ids[idx]
-        label = int(self.labels[idx])
+        
+        img_name = self.images[idx]
+        if not img_name.endswith(".jpg"):
+            img_name += ".jpg"
 
-        path = os.path.join(self.image_dir, img_id + self.ext)
-        image = Image.open(path).convert("RGB")
+        img_path = os.path.join(self.img_dir, img_name)
+        image = Image.open(img_path).convert("RGB")
 
+        label = int(self.labels[idx])  # <-- THIS IS CRITICAL
+        
         if self.transform:
             image = self.transform(image)
-        return image, label, img_id
+
+        if idx < 5:
+            print("DEBUG label:", label)
+
+        return image, label, img_name

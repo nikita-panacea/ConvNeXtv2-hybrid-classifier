@@ -1,49 +1,49 @@
-# utils/metrics.py
 import numpy as np
 from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score, accuracy_score
 
 ISIC_CLASSES = ["MEL","NV","BCC","AK","BKL","DF","VASC","SCC"]
 
-def compute_classwise_metrics(all_targets, all_preds, average='binary'):
+def compute_classwise_metrics(y_true, y_pred, class_names=ISIC_CLASSES):
     """
-    all_targets, all_preds: lists or 1D arrays of ints (0..C-1)
-    Returns dict with per-class sensitivity (recall), specificity, precision, f1, accuracy, confusion matrix
+    Returns:
+      per_class: dict[class_name] -> {precision, recall (sensitivity), specificity, f1, support}
+      overall: dict with accuracy, macro_f1, micro_f1
     """
-    y_true = np.array(all_targets)
-    y_pred = np.array(all_preds)
-    cm = confusion_matrix(y_true, y_pred, labels=list(range(len(ISIC_CLASSES))))
-    # cm[i,i] is TP for class i
-    TP = np.diag(cm).astype(float)
-    FN = cm.sum(axis=1) - TP
-    FP = cm.sum(axis=0) - TP
-    TN = cm.sum() - (TP + FP + FN)
+    if len(y_true) == 0:
+        # defensive
+        per_class = {c: {"precision": 0.0, "recall": 0.0, "specificity": 0.0, "f1": 0.0, "support": 0} for c in class_names}
+        overall = {"accuracy": 0.0, "macro_f1": 0.0, "micro_f1": 0.0}
+        return per_class, overall
 
-    sensitivity = TP / (TP + FN + 1e-12)  # recall
-    specificity = TN / (TN + FP + 1e-12)
-    precision = TP / (TP + FP + 1e-12)
-    f1 = 2 * precision * sensitivity / (precision + sensitivity + 1e-12)
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    labels = list(range(len(class_names)))
 
-    overall_acc = (TP.sum()) / cm.sum()
-
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
     per_class = {}
-    for i, name in enumerate(ISIC_CLASSES):
+    for idx, name in enumerate(class_names):
+        TP = cm[idx, idx]
+        FN = cm[idx, :].sum() - TP
+        FP = cm[:, idx].sum() - TP
+        TN = cm.sum() - (TP + FP + FN)
+        precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+        recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+        specificity = TN / (TN + FP) if (TN + FP) > 0 else 0.0
+        f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        support = int(TP + FN)
         per_class[name] = {
-            "sensitivity": float(sensitivity[i]),
-            "specificity": float(specificity[i]),
-            "precision": float(precision[i]),
-            "f1": float(f1[i]),
-            "support": int(cm.sum(axis=1)[i])
+            "precision": float(precision),
+            "recall": float(recall),        # sensitivity
+            "specificity": float(specificity),
+            "f1": float(f1),
+            "support": support
         }
 
-    macro_precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
-    macro_recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
-    macro_f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
     overall = {
-        "accuracy": float(overall_acc),
-        "macro_precision": float(macro_precision),
-        "macro_recall": float(macro_recall),
-        "macro_f1": float(macro_f1),
-        "confusion_matrix": cm.tolist()
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, labels=labels, average="macro")),
+        "micro_f1": float(f1_score(y_true, y_pred, labels=labels, average="micro")),
+        "precision_macro": float(precision_score(y_true, y_pred, labels=labels, average="macro", zero_division=0)),
+        "recall_macro": float(recall_score(y_true, y_pred, labels=labels, average="macro", zero_division=0)),
     }
-
     return per_class, overall
