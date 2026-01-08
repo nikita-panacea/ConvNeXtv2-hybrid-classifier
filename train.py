@@ -1,3 +1,4 @@
+# train.py
 #!/usr/bin/env python3
 """
 Training script matching paper methodology exactly.
@@ -104,26 +105,27 @@ def get_scheduler(optimizer, total_epochs, iters_per_epoch, warmup_epochs, peak_
     Create learning rate scheduler matching paper methodology.
     
     Phase 1 (Warmup): Linear warmup from start_lr to peak_lr over warmup_epochs
-    Phase 2 (Cosine): Cosine annealing from peak_lr to 0 over remaining epochs
+    Phase 2 (Cosine): Cosine annealing from peak_lr to near-zero over remaining epochs
     
-    Returns a multiplicative factor relative to optimizer.lr (which is set to peak_lr).
+    Optimizer is initialized with start_lr, scheduler scales it up to peak_lr then down.
     """
     total_steps = total_epochs * iters_per_epoch
     warmup_steps = warmup_epochs * iters_per_epoch
     
-    # Factors relative to peak_lr
-    start_factor = float(start_lr) / float(peak_lr)
-    peak_factor = 1.0
+    # Scale factors relative to start_lr (optimizer's initial lr)
+    peak_factor = float(peak_lr) / float(start_lr)
+    min_factor = 1e-6 / float(start_lr)  # Small but non-zero
 
     def lr_lambda(step):
         if step < warmup_steps:
-            # Linear warmup
+            # Linear warmup: start_lr -> peak_lr
             progress = float(step) / max(1, warmup_steps)
-            return start_factor + (peak_factor - start_factor) * progress
+            return 1.0 + (peak_factor - 1.0) * progress
         else:
-            # Cosine annealing
+            # Cosine annealing: peak_lr -> min_lr
             progress = (float(step) - warmup_steps) / max(1, (total_steps - warmup_steps))
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
+            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return min_factor + (peak_factor - min_factor) * cosine_decay
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -197,7 +199,9 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch,
         labels = labels.to(device, non_blocking=True)
         
         # Apply mixup after warmup
-        if args.mixup_alpha > 0 and epoch >= args.warmup_epochs:
+        use_mixup = args.mixup_alpha > 0 and epoch >= args.warmup_epochs
+        
+        if use_mixup:
             imgs, y_a, y_b, lam = mixup_data(imgs, labels, alpha=args.mixup_alpha)
             
             # Forward pass
@@ -398,9 +402,10 @@ def main():
         criterion = nn.CrossEntropyLoss()
     
     # Optimizer: SGD with momentum (paper specification)
+    # Initialize with start_lr (scheduler will handle warmup to peak_lr)
     optimizer = optim.SGD(
         model.parameters(),
-        lr=args.peak_lr,
+        lr=args.start_lr,  # Start at warmup LR
         momentum=args.momentum,
         weight_decay=args.weight_decay,
         nesterov=False
