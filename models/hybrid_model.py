@@ -1,7 +1,6 @@
 # models/hybrid_model.py
 """
 Hybrid ConvNeXtV2 + Separable Self-Attention model
-FINAL CORRECTED VERSION - Achieves exactly 21.92M parameters
 """
 import torch
 import torch.nn as nn
@@ -12,7 +11,7 @@ from models.convnextv2 import ConvNeXtV2
 class TransformerBlock(nn.Module):
     """
     Lightweight Transformer block with separable self-attention.
-    Uses 0.5x MLP expansion to achieve target parameter count.
+    Uses 0.5x MLP expansion to try achieve target parameter count.
     """
     def __init__(self, dim):
         super().__init__()
@@ -21,8 +20,8 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         
         # Ultra-lightweight MLP with 0.5x expansion
-        # This is key to achieving 21.92M total parameters
-        mlp_hidden_dim = dim // 2
+        # mlp_hidden_dim = dim // 2
+        mlp_hidden_dim = dim * 4 # (optimal setting)
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_hidden_dim),
             nn.GELU(),
@@ -39,43 +38,42 @@ class HybridConvNeXtV2(nn.Module):
     """
     Hybrid ConvNeXtV2 + Separable Self-Attention Architecture
     
-    Achieves exactly 21.92M parameters through:
-    - ConvNeXtV2 Tiny backbone for stages 1-2 (pretrained)
+    - ConvNeXtV2 Tiny backbone for stages 1-2 (pretrained), optimal setting model ConvNeXtV2 Base
     - Separable self-attention for stages 3-4 (lightweight)
-    - 0.5x MLP expansion in transformer blocks
+    - 0.5x MLP expansion in transformer blocks, optimal setting 4x MLP expansion
     
     Architecture:
     - Input: 224×224×3
-    - Stage 1: 3 ConvNeXtV2 blocks, dim=96, 56×56
-    - Stage 2: 3 ConvNeXtV2 blocks, dim=192, 28×28  
-    - Stage 3: 9 Separable Attention blocks, dim=384, 14×14 (196 tokens)
-    - Stage 4: 12 Separable Attention blocks, dim=768, 7×7 (49 tokens)
+    - Stage 1: 3 ConvNeXtV2 blocks, dim=96, 56×56, optimal setting dim=128
+    - Stage 2: 3 ConvNeXtV2 blocks, dim=192, 28×28, optimal setting dim=256  
+    - Stage 3: 9 Separable Attention blocks, dim=384, 14×14 (196 tokens), optimal setting dim=512 
+    - Stage 4: 12 Separable Attention blocks, dim=768, 7×7 (49 tokens), optimal setting dim=1024 
     - Output: 8 classes
     """
 
     def __init__(self, num_classes=8, pretrained=True):
         super().__init__()
 
-        # Create ConvNeXtV2 Tiny backbone
+        # Create ConvNeXtV2 Tiny/Base backbone
         # depths=[3,3,0,0] means only stages 1-2 have blocks
         backbone = ConvNeXtV2(
             in_chans=3,
             num_classes=1000,
             depths=[3, 3, 0, 0],
-            dims=[96, 192, 384, 768],
-            drop_path_rate=0.0,
+            dims=[128, 256, 512, 1024], # Tiny dims=[96, 192, 384, 768],
+            drop_path_rate=0.1,# drop_path_rate=0.0,
         )
 
-        # Load pretrained weights
+        # Load pretrained weights Tiny 1k: https://dl.fbaipublicfiles.com/convnext/convnextv2/im1k/convnextv2_tiny_1k_224_ema.pt
         if pretrained:
             try:
                 ckpt = torch.hub.load_state_dict_from_url(
-                    "https://dl.fbaipublicfiles.com/convnext/convnextv2/im1k/convnextv2_tiny_1k_224_ema.pt",
+                    "https://dl.fbaipublicfiles.com/convnext/convnextv2/im22k/convnextv2_base_22k_224_ema.pt",
                     map_location="cpu",
                     check_hash=True
                 )
                 msg = backbone.load_state_dict(ckpt["model"], strict=False)
-                print("Loaded ConvNeXtV2-Tiny pretrained weights")
+                print("Loaded ConvNeXtV2-Base pretrained weights ImageNet 22K")
             except Exception as e:
                 print(f"Warning: Could not load pretrained weights: {e}")
 
@@ -89,15 +87,15 @@ class HybridConvNeXtV2(nn.Module):
 
         # Replace stages 3 & 4 with separable attention
         self.stage3 = nn.Sequential(
-            *[TransformerBlock(384) for _ in range(9)]
+            *[TransformerBlock(512) for _ in range(9)] #*[TransformerBlock(384) for _ in range(9)]
         )
         self.stage4 = nn.Sequential(
-            *[TransformerBlock(768) for _ in range(12)]
+            *[TransformerBlock(1024) for _ in range(12)] #*[TransformerBlock(768) for _ in range(12)]
         )
 
         # Final layers
-        self.norm = nn.LayerNorm(768, eps=1e-6)
-        self.head = nn.Linear(768, num_classes)
+        self.norm = nn.LayerNorm(1024, eps=1e-6) #self.norm = nn.LayerNorm(768, eps=1e-6)
+        self.head = nn.Linear(1024, num_classes) #self.head = nn.Linear(768, num_classes)
         
         self._init_head()
         del backbone
@@ -152,7 +150,7 @@ if __name__ == "__main__":
     params = model.count_parameters()
     
     print(f"\nParameters: {params['total']:,} ({params['total']/1e6:.2f}M)")
-    print(f"Target: 21,920,000 (21.92M)")
+    print(f"Paper Parameters: 21,920,000 (21.92M)")
     
     diff_pct = abs(params['total'] - 21.92e6) / 21.92e6 * 100
     print(f"Difference: {diff_pct:.2f}%")

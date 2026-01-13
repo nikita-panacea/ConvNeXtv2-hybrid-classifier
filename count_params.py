@@ -4,8 +4,8 @@ Detailed parameter breakdown for the hybrid model.
 Helps identify where parameters are coming from.
 """
 import torch
-# from models.hybrid_model import HybridConvNeXtV2
-from models.hybrid_model_adaptive import HybridConvNeXtV2Adaptive
+from models.hybrid_model import HybridConvNeXtV2
+# from models.hybrid_model_adaptive import HybridConvNeXtV2Adaptive
 
 
 def count_params_recursive(module, name="", indent=0):
@@ -34,8 +34,8 @@ def detailed_breakdown():
     print("DETAILED PARAMETER BREAKDOWN")
     print("="*60)
     
-    # model = HybridConvNeXtV2(num_classes=8, pretrained=False)
-    model = HybridConvNeXtV2Adaptive(num_classes=8, pretrained=False)
+    model = HybridConvNeXtV2(num_classes=8, pretrained=False)
+    # model = HybridConvNeXtV2Adaptive(num_classes=8, pretrained=False)
     
     # Count by major component
     components = {
