@@ -60,15 +60,15 @@ class HybridConvNeXtV2(nn.Module):
             in_chans=3,
             num_classes=1000,
             depths=[3, 3, 0, 0],
-            dims=[128, 256, 512, 1024], # Tiny dims=[96, 192, 384, 768],
-            drop_path_rate=0.1,# drop_path_rate=0.0,
+            dims=[96, 192, 384, 768], # Tiny dims=[96, 192, 384, 768], Base dims=[128, 256, 512, 1024], 
+            drop_path_rate=0.0, # drop_path_rate=0.0,
         )
 
         # Load pretrained weights Tiny 1k: https://dl.fbaipublicfiles.com/convnext/convnextv2/im1k/convnextv2_tiny_1k_224_ema.pt
         if pretrained:
             try:
                 ckpt = torch.hub.load_state_dict_from_url(
-                    "https://dl.fbaipublicfiles.com/convnext/convnextv2/im22k/convnextv2_base_22k_224_ema.pt",
+                    "https://dl.fbaipublicfiles.com/convnext/convnextv2/im22k/convnextv2_tiny_22k_224_ema.pt",
                     map_location="cpu",
                     check_hash=True
                 )
@@ -87,15 +87,15 @@ class HybridConvNeXtV2(nn.Module):
 
         # Replace stages 3 & 4 with separable attention
         self.stage3 = nn.Sequential(
-            *[TransformerBlock(512) for _ in range(9)] #*[TransformerBlock(384) for _ in range(9)]
+            *[TransformerBlock(384) for _ in range(9)] # Tiny: TransformerBlock(384), Base: TransformerBlock(512)  
         )
         self.stage4 = nn.Sequential(
-            *[TransformerBlock(1024) for _ in range(12)] #*[TransformerBlock(768) for _ in range(12)]
+            *[TransformerBlock(768) for _ in range(12)] # Tiny: TransformerBlock(768), Base: TransformerBlock(1024)
         )
 
         # Final layers
-        self.norm = nn.LayerNorm(1024, eps=1e-6) #self.norm = nn.LayerNorm(768, eps=1e-6)
-        self.head = nn.Linear(1024, num_classes) #self.head = nn.Linear(768, num_classes)
+        self.norm = nn.LayerNorm(768, eps=1e-6) # Tiny: 768, Base: 1024
+        self.head = nn.Linear(768, num_classes) # Tiny 768, Base: 1024
         
         self._init_head()
         del backbone

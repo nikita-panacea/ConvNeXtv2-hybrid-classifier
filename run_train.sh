@@ -6,7 +6,7 @@ python train.py \
     --img_dir /home/ubuntu/Documents/Nikita/ISIC_2019_dataset/Train_set/Images \
     --epochs 200 \
     --batch_size 32 \
-    --out_dir checkpoints-ISIC2019-12Jan-tiny-model/
+    --out_dir checkpoints-ISIC2019-13Jan-Tiny22k-4xMLP-model/
 
     # --peak_lr 0.01 \
     # --warmup_epochs 5 \

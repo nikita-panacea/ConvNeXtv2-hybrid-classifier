@@ -15,11 +15,6 @@ Key paper specifications:
 - Transfer learning: ImageNet pretrained
 - Model EMA: decay=0.9999
 
-Expected results:
-- Accuracy: 93.48%
-- Precision: 93.24%
-- Recall: 90.70%
-- F1-score: 91.82%
 """
 import os
 import time
