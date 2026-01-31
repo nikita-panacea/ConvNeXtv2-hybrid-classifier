@@ -2,6 +2,7 @@
 import os
 import pandas as pd
 from PIL import Image
+import torch
 from torch.utils.data import Dataset
 
 ISIC_CLASSES = ["MEL","NV","BCC","AK","BKL","DF","VASC","SCC"]
@@ -41,4 +42,5 @@ class ISIC2019Dataset(Dataset):
 
         if self.transform:
             image = self.transform(image)
-        return image, label, img_id
+        label = int(self.labels[idx])
+        return image, torch.tensor(label, dtype=torch.long), img_id
