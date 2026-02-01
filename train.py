@@ -32,7 +32,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from datasets.isic2019_dataset import ISIC2019Dataset, ISIC_CLASSES
-from utils.augment import build_transforms
+from utils.augment import build_transforms, MixupAugmentation, mixup_criterion
 from utils.class_weights import compute_class_weights_from_csv
 from utils.ema import ModelEMA
 from utils.metrics import compute_classwise_metrics
@@ -87,6 +87,8 @@ def parse_args():
     p.add_argument("--use_class_weights", action="store_true", default=True,
                    help="Use class weights for imbalanced data")
     p.add_argument("--input_size", type=int, default=224, help="Input image size")
+    p.add_argument("--mixup_alpha", type=float, default=0.4,
+                   help="Mixup alpha (0.0 disables mixup; paper mentions mix-up)")
     p.add_argument("--debug", action="store_true", help="Enable debug output")
     
     return p.parse_args()
@@ -113,7 +115,8 @@ def get_scheduler(optimizer, total_epochs, iters_per_epoch, warmup_epochs):
     return scheduler
 
 
-def train_one_epoch(model, loader, optimizer, criterion, device, epoch, scheduler=None, ema=None, debug=False):
+def train_one_epoch(model, loader, optimizer, criterion, device, epoch,
+                    scheduler=None, ema=None, debug=False, mixup_fn=None):
     """Train for one epoch."""
     model.train()
     
@@ -128,9 +131,15 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch, schedule
         imgs = imgs.to(device)
         labels = labels.to(device)
         
-        # Forward pass
-        logits = model(imgs)
-        loss = criterion(logits, labels)
+        # Optional mixup
+        if mixup_fn is not None:
+            imgs, labels_a, labels_b, lam = mixup_fn(imgs, labels)
+            logits = model(imgs)
+            loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
+        else:
+            # Forward pass
+            logits = model(imgs)
+            loss = criterion(logits, labels)
         
         # Backward pass
         optimizer.zero_grad()
@@ -294,13 +303,15 @@ def main():
     print(f"\nStarting training for {args.epochs} epochs...")
     print("=" * 60)
     
+    mixup_fn = MixupAugmentation(alpha=args.mixup_alpha) if args.mixup_alpha > 0 else None
+
     for epoch in range(args.epochs):
         t0 = time.time()
         
         # Train
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, 
-            device, epoch, scheduler, ema, debug=args.debug
+            device, epoch, scheduler, ema, debug=args.debug, mixup_fn=mixup_fn
         )
         
         # Validate (using EMA model for better results)

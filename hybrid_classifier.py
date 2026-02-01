@@ -1,3 +1,12 @@
+"""
+Legacy standalone implementation of the hybrid ConvNeXtV2 + Separable Attention model.
+
+NOTE:
+- This file is NOT used by the main training pipeline.
+- Prefer using `models/hybrid_model.py` and `train.py`.
+- The training code below is wrapped in `main()` to avoid running on import.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -144,58 +153,63 @@ class ConvNeXtV2_SepAttn(nn.Module):
         x = self.norm(x)
         return self.head(x)
 
-# Dataset + training pipeline
-from torchvision import transforms
-from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
+def main():
+    # Dataset + training pipeline (legacy example)
+    from torchvision import transforms
+    from torchvision.datasets import ImageFolder
+    from torch.utils.data import DataLoader
 
-train_tfms = transforms.Compose([
-    transforms.Resize((224,224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(0.2,0.2,0.2),
-    transforms.ToTensor()
-])
+    train_tfms = transforms.Compose([
+        transforms.Resize((224,224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(15),
+        transforms.ColorJitter(0.2,0.2,0.2),
+        transforms.ToTensor()
+    ])
 
-val_tfms = transforms.Compose([
-    transforms.Resize((224,224)),
-    transforms.ToTensor()
-])
+    val_tfms = transforms.Compose([
+        transforms.Resize((224,224)),
+        transforms.ToTensor()
+    ])
 
-train_ds = ImageFolder("ISIC2019/train", transform=train_tfms)
-val_ds   = ImageFolder("ISIC2019/val", transform=val_tfms)
+    train_ds = ImageFolder("ISIC2019/train", transform=train_tfms)
+    val_ds   = ImageFolder("ISIC2019/val", transform=val_tfms)
 
-train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=4)
-val_loader   = DataLoader(val_ds, batch_size=32, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=4)
+    val_loader   = DataLoader(val_ds, batch_size=32, shuffle=False)
 
-# Training loop
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = ConvNeXtV2_SepAttn(num_classes=8).to(device)
+    # Training loop (legacy)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = ConvNeXtV2_SepAttn(num_classes=8).to(device)
 
-optimizer = torch.optim.SGD(
-    model.parameters(), lr=0.01, momentum=0.9, weight_decay=2e-5
-)
-criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(
+        model.parameters(), lr=0.01, momentum=0.9, weight_decay=2e-5
+    )
+    criterion = nn.CrossEntropyLoss()
 
-for epoch in range(50):
-    model.train()
-    for x,y in train_loader:
-        x,y = x.to(device), y.to(device)
-        optimizer.zero_grad()
-        loss = criterion(model(x), y)
-        loss.backward()
-        optimizer.step()
-
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for x,y in val_loader:
+    for epoch in range(50):
+        model.train()
+        for x,y in train_loader:
             x,y = x.to(device), y.to(device)
-            pred = model(x).argmax(1)
-            correct += (pred == y).sum().item()
-            total += y.size(0)
+            optimizer.zero_grad()
+            loss = criterion(model(x), y)
+            loss.backward()
+            optimizer.step()
 
-    print(f"Epoch {epoch}: Val Acc = {correct/total:.4f}")
+        model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for x,y in val_loader:
+                x,y = x.to(device), y.to(device)
+                pred = model(x).argmax(1)
+                correct += (pred == y).sum().item()
+                total += y.size(0)
 
-# parameter count
-sum(p.numel() for p in model.parameters()) / 1e6
+        print(f"Epoch {epoch}: Val Acc = {correct/total:.4f}")
+
+    # parameter count
+    print("Params (M):", sum(p.numel() for p in model.parameters()) / 1e6)
+
+
+if __name__ == "__main__":
+    main()

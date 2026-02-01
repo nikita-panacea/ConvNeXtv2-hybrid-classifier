@@ -20,9 +20,27 @@ def parse_args():
     p.add_argument("--device", default="cuda")
     return p.parse_args()
 
+def _build_model_from_ckpt(ckpt, device):
+    model_cfg = None
+    if isinstance(ckpt, dict):
+        model_cfg = ckpt.get("config", {}).get("model_config")
+    if model_cfg:
+        model = HybridConvNeXtV2(
+            backbone_variant=model_cfg.get("backbone_variant", "tiny"),
+            attn_type=model_cfg.get("attn_type", "minimal"),
+            mlp_ratio=model_cfg.get("mlp_ratio", 1.125),
+            stage3_blocks=model_cfg.get("stage3_blocks", 9),
+            stage4_blocks=model_cfg.get("stage4_blocks", 12),
+            num_classes=model_cfg.get("num_classes", len(ISIC_CLASSES)),
+            pretrained=False,
+        ).to(device)
+    else:
+        model = HybridConvNeXtV2(num_classes=len(ISIC_CLASSES), pretrained=False).to(device)
+    return model
+
 def load_model(ckpt_path, device):
     ckpt = torch.load(ckpt_path, map_location=device)
-    model = HybridConvNeXtV2(num_classes=len(ISIC_CLASSES), pretrained=False).to(device)
+    model = _build_model_from_ckpt(ckpt, device)
     if "ema_state" in ckpt:
         model.load_state_dict(ckpt["ema_state"], strict=False)
     elif "model_state" in ckpt:

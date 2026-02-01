@@ -14,6 +14,7 @@ ImageNet normalization is used since we're using ImageNet pretrained weights.
 """
 
 from torchvision import transforms
+from torchvision.transforms import functional as TF
 import torch
 import numpy as np
 from PIL import ImageFilter
@@ -38,7 +39,7 @@ class GaussianSmooth:
 
 
 def build_transforms(train=True, input_size=224, aa='rand-m9-mstd0.5-inc1',
-                     reprob=0.25, color_jitter=0.4, use_mixup=False):
+                     reprob=0.0, color_jitter=0.4, use_mixup=False):
     """
     Build data transforms for training or validation.
     
@@ -55,7 +56,7 @@ def build_transforms(train=True, input_size=224, aa='rand-m9-mstd0.5-inc1',
     """
     if train:
         # Training transforms with augmentation as per paper
-        return transforms.Compose([
+        train_transforms = [
             # Scaling (random resize crop)
             transforms.RandomResizedCrop(
                 input_size, 
@@ -88,15 +89,20 @@ def build_transforms(train=True, input_size=224, aa='rand-m9-mstd0.5-inc1',
             # Random erasing (additional augmentation for robustness)
             transforms.ToTensor(),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-            
-            # Random erasing after normalization
-            transforms.RandomErasing(
-                p=reprob,
-                scale=(0.02, 0.33),
-                ratio=(0.3, 3.3),
-                value='random'
-            ),
-        ])
+        ]
+
+        # Optional random erasing (not mentioned in paper; default off)
+        if reprob and reprob > 0:
+            train_transforms.append(
+                transforms.RandomErasing(
+                    p=reprob,
+                    scale=(0.02, 0.33),
+                    ratio=(0.3, 3.3),
+                    value='random'
+                )
+            )
+
+        return transforms.Compose(train_transforms)
     else:
         # Validation/test transforms (no augmentation)
         return transforms.Compose([
@@ -147,7 +153,7 @@ class MixupAugmentation:
             lam = 1.0
         
         batch_size = x.size(0)
-        index = torch.randperm(batch_size)
+        index = torch.randperm(batch_size, device=x.device)
         
         mixed_x = lam * x + (1 - lam) * x[index, :]
         y_a, y_b = y, y[index]
@@ -237,8 +243,11 @@ def get_test_time_augmentation_transforms(input_size=224):
         transforms.Compose([base_transform, transforms.RandomHorizontalFlip(p=1.0), 
                            transforms.RandomVerticalFlip(p=1.0), final_transform]),
         # 90 degree rotation
-        transforms.Compose([base_transform, 
-                           transforms.functional.rotate, final_transform]),
+        transforms.Compose([
+            base_transform,
+            transforms.Lambda(lambda img: TF.rotate(img, 90)),
+            final_transform,
+        ]),
     ]
     
     return tta_transforms
